@@ -812,7 +812,7 @@ function diffEntries(it,patch){const b=boardById(it.board);const out=[];
     else if(k==="notes")out.push({what:"บันทึก",from:"",to:"แก้ไขบันทึก"});
     else{const c=colById(k,b);if(c)out.push({what:c.name,from:fmtVal(c,old),to:fmtVal(c,v)})}}
   return out.map(e=>({...e,item:it.id,title:patch.title||it.title}))}
-async function updItem(id,patch,extraLog){if(!S.db)return;const it=S.items.find(i=>i.id===id);if(!it)return;{const bb=boardById(it.board);if(bb&&isSchedule(bb))setTimeout(movePastAppts,400)}
+async function updItem(id,patch,extraLog){if(!S.db)return;const it=S.items.find(i=>i.id===id);if(!it)return;{const bb=boardById(it.board);if(bb&&isSchedule(bb))setTimeout(movePastAppts,400);else if(bb&&doneGroupOf(bb.id))setTimeout(moveDoneItems,600)}
   const entries=diffEntries(it,patch).concat((extraLog||[]).map(e=>({item:id,title:it.title,...e})));
   const full={...patch,updatedAt:Date.now(),updatedBy:S.me||""};Object.assign(it,full);render();
   try{await retry(()=>S.db.doc("items/"+id).update(full));logAct(it.board,entries)}catch(e){writeErr(e)}}
@@ -1226,6 +1226,18 @@ async function movePastAppts(){if(pastBusy||!S.canWrite||!S.db||S.importing)retu
       else if(end>=now&&inArc&&live.length){const back=live.find(g=>g.id===it.prevGroup)||live[0];await S.db.doc("items/"+it.id).update({group:back.id});it.group=back.id}}}
   }catch(e){console.warn(e)}finally{pastBusy=false}}
 
+/* auto-move: tasks whose status is done go to the board's "done group" (set in the group menu); moved back if reopened */
+function doneGroupOf(bid){return groupsOf(bid).find(g=>g.doneGroup&&!g.archive)||null}
+let doneBusy=false;
+async function moveDoneItems(){if(doneBusy||!S.canWrite||!S.db||S.importing)return;doneBusy=true;
+  try{for(const b of S.boards){if(isSchedule(b))continue;const dg=doneGroupOf(b.id);if(!dg)continue;
+    const live=groupsOf(b.id).filter(g=>g.id!==dg.id&&!g.archive);
+    for(const it of itemsOf(b.id)){if(it.parent)continue;const d=isDone(it,b);
+      if(d&&it.group!==dg.id&&!groupOf(it.group)?.archive){await S.db.doc("items/"+it.id).update({group:dg.id,prevGroup:it.group||""});it.group=dg.id}
+      else if(!d&&it.group===dg.id&&it.prevGroup&&live.length){const back=live.find(g=>g.id===it.prevGroup)||live[0];await S.db.doc("items/"+it.id).update({group:back.id});it.group=back.id}}}
+  }catch(e){console.warn(e)}finally{doneBusy=false}}
+function autoMove(){movePastAppts();moveDoneItems()}
+
 /* columns */
 function colMenu(anchor,colId){const cs=cols();const i=cs.findIndex(c=>c.id===colId);const c=cs[i];if(!c)return;const b=board();const so=sortOf();
   const canSort=c.type!=="link";
@@ -1364,6 +1376,7 @@ function groupMenu(anchor,gid){const g=groupOf(gid);if(!g)return;const gi=S.item
     <div class="row"><button class="btn primary" type="button" data-y="save">บันทึก</button></div><hr>
     <button class="menu-btn" type="button" data-y="up" ${ix<=0?"disabled":""}>${I.up} ย้ายกลุ่มขึ้น</button>
     <button class="menu-btn" type="button" data-y="down" ${ix>=gs.length-1?"disabled":""}>${I.down} ย้ายกลุ่มลง</button>
+    ${isSchedule(board())||g.archive?"":`<button class="menu-btn" type="button" data-y="donegrp" aria-pressed="${!!g.doneGroup}">${g.doneGroup?"✓ กลุ่มงานเสร็จ (เปิดอยู่) · กดเพื่อปิด":"ตั้งเป็นกลุ่มงานเสร็จ: ย้ายงานสถานะ Done มาที่นี่อัตโนมัติ"}</button>`}
     <button class="menu-btn" type="button" data-y="dup">${I.copy} ทำสำเนากลุ่ม (ใช้เป็นแม่แบบ)</button>
     <button class="menu-btn" type="button" data-y="dl">${I.dl} ดาวน์โหลดกลุ่มนี้ (Excel)</button>
     <button class="menu-btn" type="button" data-y="archive" ${gi.length?"":"disabled"}>${I.box} Archive: ดาวน์โหลดแล้วลบออกจากบอร์ด</button>
@@ -1376,6 +1389,10 @@ function groupMenu(anchor,gid){const g=groupOf(gid);if(!g)return;const gi=S.item
       if(x==="save")save();
       else if(x==="up"||x==="down"){const j=x==="up"?ix-1:ix+1;const a=gs[ix],o=gs[j];const oa=a.order||0,ob=o.order||0;const na=oa===ob?ob+(x==="up"?-1:1):ob;
         try{await S.db.doc("groups/"+a.id).update({order:na});await S.db.doc("groups/"+o.id).update({order:oa})}catch(er){writeErr(er)}closePop()}
+      else if(x==="donegrp"){const on=!g.doneGroup;closePop();
+        try{for(const o of gs)if(o.id!==g.id&&o.doneGroup)await S.db.doc("groups/"+o.id).update({doneGroup:false});
+          await S.db.doc("groups/"+g.id).update({doneGroup:on});g.doneGroup=on;
+          toast(on?`งานที่สถานะ Done จะย้ายไปกลุ่ม "${g.name}" อัตโนมัติ`:"ปิดการย้ายงาน Done อัตโนมัติแล้ว");if(on)setTimeout(moveDoneItems,300)}catch(er){writeErr(er)}}
       else if(x==="dup")dupGroupPop(anchor,gid);
       else if(x==="dl"){closePop();exportExcel({groupIds:[gid]})}
       else if(x==="archive"){if(armed!=="archive"){armed="archive";btn.textContent=`กดอีกครั้ง: ดาวน์โหลด Excel แล้วลบงาน ${gi.length} รายการออกจากบอร์ด`;return}closePop();archiveGroup(gid)}
@@ -1774,7 +1791,7 @@ render();
     db.doc("meta/import").get().then(s=>{S.importMeta=s.exists?s.data():null;render()}).catch(()=>{S.importMeta=null;render()})}
   let booted=false;
   const ready=()=>{const g=S.got;if(g.b&&g.g&&g.i&&g.p&&S.status==="loading"){S.status="ready";clearTimeout(timer)}
-    if(S.status==="ready"){if(S.importing)return;pickBoard();renderSoon();queueProfiles();tryOpenPending();if(!booted){booted=true;setTimeout(countActivity,2500);setTimeout(autoRenew,1500);setTimeout(movePastAppts,2000);setInterval(movePastAppts,5*60000)}}};
+    if(S.status==="ready"){if(S.importing)return;pickBoard();renderSoon();queueProfiles();tryOpenPending();if(!booted){booted=true;setTimeout(countActivity,2500);setTimeout(autoRenew,1500);setTimeout(autoMove,2000);setInterval(autoMove,5*60000)}}};
   const fail=()=>{if(S.status==="loading"){clearTimeout(timer);S.status="timeout";render()}};
   db.collection("boards").onSnapshot(s=>{S.boards=s.docs.map(d=>({id:d.id,...d.data()}));S.got.b=1;ready()},fail);
   db.collection("groups").onSnapshot(s=>{S.groups=s.docs.map(d=>({id:d.id,...d.data()}));S.got.g=1;ready()},fail);
